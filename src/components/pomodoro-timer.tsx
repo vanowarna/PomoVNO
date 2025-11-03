@@ -13,6 +13,7 @@ import {
   Expand,
   Shrink,
 } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 type Mode = 'work' | 'shortBreak' | 'longBreak';
 
