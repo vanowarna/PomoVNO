@@ -90,7 +90,7 @@ body {
 @layer utilities {
   .flash-overlay-animation {
     opacity: 0;
-    animation: flash-opacity 0.2s ease-in-out 5;
+    animation: flash-opacity 0.2s ease-in-out 10;
   }
 
   @keyframes flash-opacity {
