@@ -12,3 +12,5 @@ The Pomodoro Technique is a time management method that uses a timer to break do
 - **Sound & Visual Notifications:** Get notified with a beep and a screen flash when a session ends.
 - **Fullscreen Mode:** Immerse yourself in your work with a distraction-free fullscreen view.
 - **Clean, Minimalist Interface:** A beautiful and simple UI that helps you focus on what matters: your work.
+
+```4S6VNO```
