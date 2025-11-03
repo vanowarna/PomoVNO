@@ -61,7 +61,8 @@ export function PomodoroTimer() {
     }
   }, [settings.soundEnabled]);
   
-  const resetTimer = useCallback((newMode: Mode) => {
+  const switchModeAndReset = useCallback((newMode: Mode) => {
+    setMode(newMode);
     let newTime;
     switch (newMode) {
       case 'work':
@@ -75,7 +76,6 @@ export function PomodoroTimer() {
         break;
     }
     setTimeLeft(newTime);
-    return newTime;
   }, [settings]);
 
   useEffect(() => {
@@ -87,34 +87,30 @@ export function PomodoroTimer() {
       }, 1000);
     } else if (timeLeft === 0 && isActive) {
       playNotification();
-      let nextMode: Mode = mode;
       if (mode === 'work') {
         const newSessions = sessions + 1;
         setSessions(newSessions);
-        nextMode = newSessions % 4 === 0 ? 'longBreak' : 'shortBreak';
+        switchModeAndReset(newSessions % 4 === 0 ? 'longBreak' : 'shortBreak');
       } else {
-        nextMode = 'work';
+        switchModeAndReset('work');
       }
-      setMode(nextMode);
-      resetTimer(nextMode);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isActive, timeLeft, mode, sessions, playNotification, resetTimer]);
+  }, [isActive, timeLeft, mode, sessions, playNotification, switchModeAndReset]);
   
   const handleModeChange = (newMode: Mode) => {
     if(mode === newMode) return;
-    setMode(newMode);
-    resetTimer(newMode);
     setIsActive(false);
+    switchModeAndReset(newMode);
   }
 
   useEffect(() => {
-    resetTimer(mode);
     setIsActive(false);
-  }, [settings, resetTimer, mode]);
+    switchModeAndReset(mode);
+  }, [settings, switchModeAndReset, mode]);
   
   const toggleActive = () => {
     if (timeLeft === 0) return;
@@ -136,7 +132,7 @@ export function PomodoroTimer() {
 
   const manualReset = () => {
     setIsActive(false);
-    resetTimer(mode);
+    switchModeAndReset(mode);
   }
 
   return (
