@@ -57,7 +57,7 @@ export function PomodoroTimer() {
     setTimeout(() => setIsFlashing(false), 1000); // 5 flashes * 0.2s duration
 
     if (settings.soundEnabled && synth.current) {
-      synth.current.triggerAttackRelease('C5', '0.5s', Tone.now());
+      synth.current.triggerAttackRelease('C5', '0.5s');
     }
   }, [settings.soundEnabled]);
   
