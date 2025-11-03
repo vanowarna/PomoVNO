@@ -41,7 +41,12 @@ export function PomodoroTimer() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      synth.current = new Tone.Synth().toDestination();
+      // Ensure Tone.js context is started
+      const startAudio = async () => {
+        await Tone.start();
+        synth.current = new Tone.Synth().toDestination();
+      };
+      startAudio();
 
       const onFullScreenChange = () => {
         setIsFullScreen(!!document.fullscreenElement);
@@ -56,12 +61,12 @@ export function PomodoroTimer() {
     setIsFlashing(true);
     setTimeout(() => setIsFlashing(false), 1000); // 5 flashes * 0.2s duration
 
-    if (settings.soundEnabled && synth.current) {
+    if (settings.soundEnabled && synth.current && Tone.context.state === 'running') {
       synth.current.triggerAttackRelease('C5', '0.5s');
     }
   }, [settings.soundEnabled]);
   
-  const switchModeAndReset = useCallback((newMode: Mode) => {
+  const resetTimer = useCallback((newMode: Mode) => {
     setMode(newMode);
     let newTime;
     switch (newMode) {
@@ -85,35 +90,39 @@ export function PomodoroTimer() {
       interval = setInterval(() => {
         setTimeLeft((prev) => prev - 1);
       }, 1000);
-    } else if (timeLeft === 0 && isActive) {
+    } else if (isActive && timeLeft === 0) {
       playNotification();
       if (mode === 'work') {
         const newSessions = sessions + 1;
         setSessions(newSessions);
-        switchModeAndReset(newSessions % 4 === 0 ? 'longBreak' : 'shortBreak');
+        resetTimer(newSessions % 4 === 0 ? 'longBreak' : 'shortBreak');
       } else {
-        switchModeAndReset('work');
+        resetTimer('work');
       }
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isActive, timeLeft, mode, sessions, playNotification, switchModeAndReset]);
+  }, [isActive, timeLeft, mode, sessions, playNotification, resetTimer]);
   
   const handleModeChange = (newMode: Mode) => {
     if(mode === newMode) return;
     setIsActive(false);
-    switchModeAndReset(newMode);
+    resetTimer(newMode);
   }
 
   useEffect(() => {
     setIsActive(false);
-    switchModeAndReset(mode);
-  }, [settings, switchModeAndReset, mode]);
+    resetTimer(mode);
+  }, [settings, mode, resetTimer]);
   
   const toggleActive = () => {
     if (timeLeft === 0) return;
+    // This will start the audio context if it's not already running
+    if (Tone.context.state !== 'running') {
+      Tone.start();
+    }
     setIsActive(!isActive);
   };
 
@@ -132,7 +141,7 @@ export function PomodoroTimer() {
 
   const manualReset = () => {
     setIsActive(false);
-    switchModeAndReset(mode);
+    resetTimer(mode);
   }
 
   return (
