@@ -62,28 +62,32 @@ export function PomodoroTimer() {
   }, [settings.soundEnabled]);
   
   const resetTimer = useCallback((newMode: Mode) => {
+    let newTime;
     switch (newMode) {
       case 'work':
-        setTimeLeft(settings.work * 60);
+        newTime = settings.work * 60;
         break;
       case 'shortBreak':
-        setTimeLeft(settings.shortBreak * 60);
+        newTime = settings.shortBreak * 60;
         break;
       case 'longBreak':
-        setTimeLeft(settings.longBreak * 60);
+        newTime = settings.longBreak * 60;
         break;
     }
+    setTimeLeft(newTime);
+    return newTime;
   }, [settings]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
+
     if (isActive && timeLeft > 0) {
       interval = setInterval(() => {
         setTimeLeft((prev) => prev - 1);
       }, 1000);
     } else if (timeLeft === 0 && isActive) {
       playNotification();
-      let nextMode: Mode = 'work';
+      let nextMode: Mode = mode;
       if (mode === 'work') {
         const newSessions = sessions + 1;
         setSessions(newSessions);
@@ -94,6 +98,7 @@ export function PomodoroTimer() {
       setMode(nextMode);
       resetTimer(nextMode);
     }
+
     return () => {
       if (interval) clearInterval(interval);
     };
