@@ -61,9 +61,8 @@ export function PomodoroTimer() {
     }
   }, [settings.soundEnabled]);
   
-  const resetTimer = useCallback(() => {
-    setIsActive(false);
-    switch (mode) {
+  const resetTimer = useCallback((newMode: Mode) => {
+    switch (newMode) {
       case 'work':
         setTimeLeft(settings.work * 60);
         break;
@@ -74,7 +73,7 @@ export function PomodoroTimer() {
         setTimeLeft(settings.longBreak * 60);
         break;
     }
-  }, [mode, settings]);
+  }, [settings]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
@@ -84,33 +83,38 @@ export function PomodoroTimer() {
       }, 1000);
     } else if (timeLeft === 0 && isActive) {
       playNotification();
+      let nextMode: Mode = 'work';
       if (mode === 'work') {
         const newSessions = sessions + 1;
         setSessions(newSessions);
-        setMode(newSessions % 4 === 0 ? 'longBreak' : 'shortBreak');
+        nextMode = newSessions % 4 === 0 ? 'longBreak' : 'shortBreak';
       } else {
-        setMode('work');
+        nextMode = 'work';
       }
+      setMode(nextMode);
+      resetTimer(nextMode);
     }
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isActive, timeLeft, mode, sessions, playNotification]);
+  }, [isActive, timeLeft, mode, sessions, playNotification, resetTimer]);
+  
+  const handleModeChange = (newMode: Mode) => {
+    if(mode === newMode) return;
+    setMode(newMode);
+    resetTimer(newMode);
+    setIsActive(false);
+  }
 
   useEffect(() => {
-    resetTimer();
-  }, [mode, settings, resetTimer]);
+    resetTimer(mode);
+    setIsActive(false);
+  }, [settings, resetTimer, mode]);
   
   const toggleActive = () => {
     if (timeLeft === 0) return;
     setIsActive(!isActive);
   };
-
-  const handleModeChange = (newMode: Mode) => {
-    if(mode === newMode) return;
-    setMode(newMode);
-    setIsActive(false);
-  }
 
   const handleSaveSettings = (newSettings: Settings) => {
     setSettings(newSettings);
@@ -124,6 +128,11 @@ export function PomodoroTimer() {
       document.exitFullscreen();
     }
   };
+
+  const manualReset = () => {
+    setIsActive(false);
+    resetTimer(mode);
+  }
 
   return (
     <>
@@ -162,7 +171,7 @@ export function PomodoroTimer() {
             {isActive ? <Pause size={28} /> : <Play size={28} />}
             <span className="ml-2">{isActive ? 'Pause' : 'Start'}</span>
           </Button>
-          <Button onClick={resetTimer} variant="secondary" size="lg" className="h-16 w-16 rounded-2xl" aria-label="Reset Timer">
+          <Button onClick={manualReset} variant="secondary" size="lg" className="h-16 w-16 rounded-2xl" aria-label="Reset Timer">
             <RotateCcw size={28} />
           </Button>
         </div>
