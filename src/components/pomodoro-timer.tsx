@@ -135,7 +135,8 @@ export function PomodoroTimer() {
     }
     
     if (!isMobile) {
-        document.title = `${formatTime(timeLeft)} | ${initialTitle.current}`;
+        const modeLabel = mode === 'work' ? 'WORK' : 'BREAK';
+        document.title = `(${formatTime(timeLeft)}) ${modeLabel} | ${initialTitle.current}`;
     }
 
     const interval = settings.showMilliseconds ? 10 : 1000;
@@ -166,7 +167,7 @@ export function PomodoroTimer() {
         document.title = initialTitle.current;
       }
     };
-  }, [isActive, timeLeft, settings.showMilliseconds, advanceMode, isMobile]);
+  }, [isActive, timeLeft, settings.showMilliseconds, advanceMode, isMobile, mode]);
 
 
   useEffect(() => {
