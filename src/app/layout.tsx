@@ -4,8 +4,8 @@ import { Toaster } from "@/components/ui/toaster";
 import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = {
-  title: 'PomoVNO',
-  description: 'A minimalistic Pomodoro timer to boost your productivity.',
+  title: 'Pomodoro Timer | Vano',
+  description: 'A simple and effective Pomodoro timer to help you stay focused and boost productivity. Made by 4S6VNO.',
 };
 
 export default function RootLayout({
