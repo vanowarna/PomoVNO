@@ -21,10 +21,10 @@ const formatTime = (time: number, showMilliseconds: boolean): string => {
   const totalSeconds = Math.floor(time / 1000);
   const mins = Math.floor(totalSeconds / 60);
   const secs = totalSeconds % 60;
-  const ms = Math.floor((time % 1000) / 10);
+  const ms = Math.floor(time % 1000);
 
   if (showMilliseconds) {
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
   }
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 };
@@ -47,6 +47,7 @@ export function PomodoroTimer() {
 
   const synth = useRef<Tone.Synth | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const nextModeRef = useRef<Mode | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -73,7 +74,7 @@ export function PomodoroTimer() {
       synth.current.triggerAttackRelease('C5', '0.5s');
     }
   }, [settings.soundEnabled]);
-  
+
   const resetTimer = useCallback((newMode: Mode, newSettings?: Settings) => {
     const currentSettings = newSettings || settings;
     let newTime;
@@ -90,62 +91,70 @@ export function PomodoroTimer() {
     }
     setMode(newMode);
     setTimeLeft(newTime);
-    return newTime;
   }, [settings]);
 
-  const stopTimer = () => {
+  const stopTimer = useCallback(() => {
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
     }
     setIsActive(false);
-  };
-  
-  const startTimer = useCallback(() => {
-    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    
-    setIsActive(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isActive) {
+      return;
+    }
+
     const interval = settings.showMilliseconds ? 10 : 1000;
     const startTime = Date.now();
     const endTime = startTime + timeLeft;
 
     timerIntervalRef.current = setInterval(() => {
       const newTimeLeft = endTime - Date.now();
-      
+
       if (newTimeLeft <= 0) {
         setTimeLeft(0);
         playNotification();
-        if(timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+        stopTimer();
 
-        let nextMode: Mode;
         if (mode === 'work') {
           const newSessions = sessions + 1;
           setSessions(newSessions);
-          nextMode = newSessions % 4 === 0 ? 'longBreak' : 'shortBreak';
+          nextModeRef.current = newSessions % 4 === 0 ? 'longBreak' : 'shortBreak';
         } else {
           if (mode === 'longBreak') {
             setSessions(0);
           }
-          nextMode = 'work';
+          nextModeRef.current = 'work';
         }
-
-        const newTimeForNextMode = resetTimer(nextMode);
-        setTimeLeft(newTimeForNextMode);
-        // This will be picked up by the other useEffect to start the next timer
       } else {
         setTimeLeft(newTimeLeft);
       }
     }, interval);
-  }, [timeLeft, mode, sessions, settings, playNotification, resetTimer]);
-  
-  // Effect to automatically start the next timer when mode changes after completion
-  useEffect(() => {
-    if (isActive && timeLeft === 0) {
-        // When a timer finishes, start the next one.
-        startTimer();
-    }
-  }, [timeLeft, isActive, startTimer]);
 
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+    };
+  }, [isActive, timeLeft, mode, sessions, settings, playNotification, stopTimer]);
+
+  useEffect(() => {
+    if (timeLeft === 0 && nextModeRef.current) {
+      resetTimer(nextModeRef.current);
+      nextModeRef.current = null;
+    }
+  }, [timeLeft, resetTimer]);
+
+  useEffect(() => {
+    if(timeLeft > 0 && timeLeft < (settings[mode] * 60 * 1000)) {
+        if(mode !== 'work' || sessions > 0){
+            setIsActive(true);
+        }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeLeft, mode]);
 
   useEffect(() => {
     stopTimer();
@@ -156,6 +165,7 @@ export function PomodoroTimer() {
   const handleModeChange = (newMode: Mode) => {
     if(mode === newMode) return;
     stopTimer();
+    setSessions(0); // Reset sessions if user manually changes mode
     resetTimer(newMode);
   }
   
@@ -163,11 +173,7 @@ export function PomodoroTimer() {
     if (Tone.context.state !== 'running') {
         Tone.start();
     }
-    if (isActive) {
-      stopTimer();
-    } else {
-      startTimer();
-    }
+    setIsActive(!isActive);
   };
 
   const manualReset = () => {
@@ -183,11 +189,15 @@ export function PomodoroTimer() {
     resetTimer(mode, newSettings);
   };
 
-  const toggleFullScreen = () => {
-    if (!isFullScreen) {
-      document.documentElement.requestFullscreen();
-    } else {
-      document.exitFullscreen();
+  const toggleFullScreen = async () => {
+    try {
+      if (!isFullScreen) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch (err) {
+      console.error("Fullscreen API error:", err);
     }
   };
 
