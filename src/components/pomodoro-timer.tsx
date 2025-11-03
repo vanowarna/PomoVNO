@@ -16,9 +16,15 @@ import {
 
 type Mode = 'work' | 'shortBreak' | 'longBreak';
 
-const formatTime = (seconds: number): string => {
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
+const formatTime = (time: number, showMilliseconds: boolean): string => {
+  const totalSeconds = Math.floor(time / 1000);
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  const ms = Math.floor((time % 1000) / 10);
+
+  if (showMilliseconds) {
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
+  }
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 };
 
@@ -28,9 +34,10 @@ export function PomodoroTimer() {
     shortBreak: 5,
     longBreak: 15,
     soundEnabled: true,
+    showMilliseconds: false,
   });
   const [mode, setMode] = useState<Mode>('work');
-  const [timeLeft, setTimeLeft] = useState(settings.work * 60);
+  const [timeLeft, setTimeLeft] = useState(settings.work * 60 * 1000);
   const [isActive, setIsActive] = useState(false);
   const [sessions, setSessions] = useState(0);
   const [isFlashing, setIsFlashing] = useState(false);
@@ -38,6 +45,7 @@ export function PomodoroTimer() {
   const [isFullScreen, setIsFullScreen] = useState(false);
 
   const synth = useRef<Tone.Synth | null>(null);
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -58,84 +66,111 @@ export function PomodoroTimer() {
 
   const playNotification = useCallback(() => {
     setIsFlashing(true);
-    setTimeout(() => setIsFlashing(false), 1000); 
+    setTimeout(() => setIsFlashing(false), 2000); 
 
     if (settings.soundEnabled && synth.current && Tone.context.state === 'running') {
       synth.current.triggerAttackRelease('C5', '0.5s');
     }
   }, [settings.soundEnabled]);
   
-  const resetTimer = useCallback((newMode: Mode) => {
+  const resetTimer = useCallback((newMode: Mode, newSettings?: Settings) => {
+    const currentSettings = newSettings || settings;
     let newTime;
     switch (newMode) {
       case 'work':
-        newTime = settings.work * 60;
+        newTime = currentSettings.work * 60 * 1000;
         break;
       case 'shortBreak':
-        newTime = settings.shortBreak * 60;
+        newTime = currentSettings.shortBreak * 60 * 1000;
         break;
       case 'longBreak':
-        newTime = settings.longBreak * 60;
+        newTime = currentSettings.longBreak * 60 * 1000;
         break;
     }
     setMode(newMode);
     setTimeLeft(newTime);
+    return newTime;
   }, [settings]);
 
-  useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-
-    if (isActive && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
-      }, 1000);
-    } else if (isActive && timeLeft === 0) {
-      playNotification();
-      
-      if (mode === 'work') {
-        const newSessions = sessions + 1;
-        setSessions(newSessions);
-        resetTimer(newSessions % 4 === 0 ? 'longBreak' : 'shortBreak');
-      } else {
-        if(mode === 'longBreak') {
-          setSessions(0);
-        }
-        resetTimer('work');
-      }
+  const stopTimer = () => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
     }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [isActive, timeLeft, mode, sessions, playNotification, resetTimer]);
-
-  useEffect(() => {
     setIsActive(false);
-    let newTime;
-    switch(mode){
-        case 'work': newTime = settings.work * 60; break;
-        case 'shortBreak': newTime = settings.shortBreak * 60; break;
-        case 'longBreak': newTime = settings.longBreak * 60; break;
+  };
+  
+  const startTimer = useCallback(() => {
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    
+    setIsActive(true);
+    const interval = settings.showMilliseconds ? 10 : 1000;
+    const startTime = Date.now();
+    const endTime = startTime + timeLeft;
+
+    timerIntervalRef.current = setInterval(() => {
+      const newTimeLeft = endTime - Date.now();
+      
+      if (newTimeLeft <= 0) {
+        setTimeLeft(0);
+        playNotification();
+        if(timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+
+        let nextMode: Mode;
+        if (mode === 'work') {
+          const newSessions = sessions + 1;
+          setSessions(newSessions);
+          nextMode = newSessions % 4 === 0 ? 'longBreak' : 'shortBreak';
+        } else {
+          if (mode === 'longBreak') {
+            setSessions(0);
+          }
+          nextMode = 'work';
+        }
+
+        const newTimeForNextMode = resetTimer(nextMode);
+        setTimeLeft(newTimeForNextMode);
+        // This will be picked up by the other useEffect to start the next timer
+      } else {
+        setTimeLeft(newTimeLeft);
+      }
+    }, interval);
+  }, [timeLeft, mode, sessions, settings, playNotification, resetTimer]);
+  
+  // Effect to automatically start the next timer when mode changes after completion
+  useEffect(() => {
+    if (isActive && timeLeft === 0) {
+        // When a timer finishes, start the next one.
+        startTimer();
     }
-    setTimeLeft(newTime);
+  }, [timeLeft, isActive, startTimer]);
+
+
+  useEffect(() => {
+    stopTimer();
+    resetTimer(mode);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
   
   const handleModeChange = (newMode: Mode) => {
     if(mode === newMode) return;
-    setIsActive(false);
+    stopTimer();
     resetTimer(newMode);
   }
   
   const toggleActive = () => {
-    if (timeLeft === 0) return;
     if (Tone.context.state !== 'running') {
-      Tone.start();
+        Tone.start();
     }
-    setIsActive(!isActive);
+    if (isActive) {
+      stopTimer();
+    } else {
+      startTimer();
+    }
   };
 
   const manualReset = () => {
-    setIsActive(false);
+    stopTimer();
     setSessions(0);
     resetTimer(mode);
   }
@@ -143,8 +178,8 @@ export function PomodoroTimer() {
   const handleSaveSettings = (newSettings: Settings) => {
     setSettings(newSettings);
     setIsSettingsOpen(false);
-    setIsActive(false);
-    resetTimer(mode);
+    stopTimer();
+    resetTimer(mode, newSettings);
   };
 
   const toggleFullScreen = () => {
@@ -178,8 +213,11 @@ export function PomodoroTimer() {
         </Tabs>
 
         <div className="my-10 text-center">
-          <h1 className="text-8xl font-black tabular-nums sm:text-9xl">
-            {formatTime(timeLeft)}
+          <h1 className={cn(
+            "font-black tabular-nums",
+            settings.showMilliseconds ? "text-7xl sm:text-8xl" : "text-8xl sm:text-9xl"
+          )}>
+            {formatTime(timeLeft, settings.showMilliseconds)}
           </h1>
         </div>
 
