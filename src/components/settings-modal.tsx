@@ -128,19 +128,6 @@ export function SettingsModal({
                   onCheckedChange={handleSwitchChange('soundEnabled')}
                 />
               </div>
-              <div className="flex items-center justify-between rounded-lg border p-4">
-                <div className="space-y-0.5">
-                    <Label htmlFor="ms-switch" className="text-base">Milliseconds</Label>
-                    <p className="text-sm text-muted-foreground">
-                        Show milliseconds for extra precision.
-                    </p>
-                </div>
-                <Switch
-                  id="ms-switch"
-                  checked={localSettings.showMilliseconds}
-                  onCheckedChange={handleSwitchChange('showMilliseconds')}
-                />
-              </div>
             </div>
           </div>
         </div>

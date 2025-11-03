@@ -14,18 +14,15 @@ import {
   Shrink,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 type Mode = 'work' | 'shortBreak' | 'longBreak';
 
-const formatTime = (time: number, showMilliseconds: boolean): string => {
+const formatTime = (time: number): string => {
   const totalSeconds = Math.floor(time / 1000);
   const mins = Math.floor(totalSeconds / 60);
   const secs = totalSeconds % 60;
-  const ms = Math.floor(time % 1000);
 
-  if (showMilliseconds) {
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
-  }
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 };
 
@@ -44,9 +41,11 @@ export function PomodoroTimer() {
   const [isFlashing, setIsFlashing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
+  const isMobile = useIsMobile();
 
   const synth = useRef<Tone.Synth | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const initialTitle = useRef(typeof document !== 'undefined' ? document.title : 'Pomodoro Timer | Vano');
   
   const getTimeForMode = useCallback((mode: Mode, currentSettings = settings) => {
     switch (mode) {
@@ -84,7 +83,7 @@ export function PomodoroTimer() {
 
   const playNotification = useCallback(() => {
     setIsFlashing(true);
-    setTimeout(() => setIsFlashing(false), 1000);
+    setTimeout(() => setIsFlashing(false), 2000); // Corresponds to 10 flashes over 2s
 
     if (settings.soundEnabled && synth.current && Tone.context.state === 'running') {
         try {
@@ -129,7 +128,14 @@ export function PomodoroTimer() {
 
   useEffect(() => {
     if (!isActive) {
+      if (!isMobile) {
+        document.title = initialTitle.current;
+      }
       return;
+    }
+    
+    if (!isMobile) {
+        document.title = `${formatTime(timeLeft)} | ${initialTitle.current}`;
     }
 
     const interval = settings.showMilliseconds ? 10 : 1000;
@@ -156,8 +162,11 @@ export function PomodoroTimer() {
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
       }
+      if (!isMobile) {
+        document.title = initialTitle.current;
+      }
     };
-  }, [isActive, timeLeft, settings.showMilliseconds, advanceMode]);
+  }, [isActive, timeLeft, settings.showMilliseconds, advanceMode, isMobile]);
 
 
   useEffect(() => {
@@ -231,10 +240,9 @@ export function PomodoroTimer() {
 
         <div className="my-10 text-center">
           <h1 className={cn(
-            "font-black tabular-nums",
-            settings.showMilliseconds ? "text-7xl sm:text-8xl" : "text-8xl sm:text-9xl"
+            "font-black tabular-nums text-8xl sm:text-9xl"
           )}>
-            {formatTime(timeLeft, settings.showMilliseconds)}
+            {formatTime(timeLeft)}
           </h1>
         </div>
 
