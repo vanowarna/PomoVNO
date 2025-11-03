@@ -41,7 +41,6 @@ export function PomodoroTimer() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      // Ensure Tone.js context is started
       const startAudio = async () => {
         await Tone.start();
         synth.current = new Tone.Synth().toDestination();
@@ -59,7 +58,7 @@ export function PomodoroTimer() {
 
   const playNotification = useCallback(() => {
     setIsFlashing(true);
-    setTimeout(() => setIsFlashing(false), 1000); // 5 flashes * 0.2s duration
+    setTimeout(() => setIsFlashing(false), 1000); 
 
     if (settings.soundEnabled && synth.current && Tone.context.state === 'running') {
       synth.current.triggerAttackRelease('C5', '0.5s');
@@ -67,7 +66,6 @@ export function PomodoroTimer() {
   }, [settings.soundEnabled]);
   
   const resetTimer = useCallback((newMode: Mode) => {
-    setMode(newMode);
     let newTime;
     switch (newMode) {
       case 'work':
@@ -80,6 +78,7 @@ export function PomodoroTimer() {
         newTime = settings.longBreak * 60;
         break;
     }
+    setMode(newMode);
     setTimeLeft(newTime);
   }, [settings]);
 
@@ -92,11 +91,15 @@ export function PomodoroTimer() {
       }, 1000);
     } else if (isActive && timeLeft === 0) {
       playNotification();
+      
       if (mode === 'work') {
         const newSessions = sessions + 1;
         setSessions(newSessions);
         resetTimer(newSessions % 4 === 0 ? 'longBreak' : 'shortBreak');
       } else {
+        if(mode === 'longBreak') {
+          setSessions(0);
+        }
         resetTimer('work');
       }
     }
@@ -105,30 +108,43 @@ export function PomodoroTimer() {
       if (interval) clearInterval(interval);
     };
   }, [isActive, timeLeft, mode, sessions, playNotification, resetTimer]);
+
+  useEffect(() => {
+    setIsActive(false);
+    let newTime;
+    switch(mode){
+        case 'work': newTime = settings.work * 60; break;
+        case 'shortBreak': newTime = settings.shortBreak * 60; break;
+        case 'longBreak': newTime = settings.longBreak * 60; break;
+    }
+    setTimeLeft(newTime);
+  }, [settings]);
   
   const handleModeChange = (newMode: Mode) => {
     if(mode === newMode) return;
     setIsActive(false);
     resetTimer(newMode);
   }
-
-  useEffect(() => {
-    setIsActive(false);
-    resetTimer(mode);
-  }, [settings, mode, resetTimer]);
   
   const toggleActive = () => {
     if (timeLeft === 0) return;
-    // This will start the audio context if it's not already running
     if (Tone.context.state !== 'running') {
       Tone.start();
     }
     setIsActive(!isActive);
   };
 
+  const manualReset = () => {
+    setIsActive(false);
+    setSessions(0);
+    resetTimer(mode);
+  }
+
   const handleSaveSettings = (newSettings: Settings) => {
     setSettings(newSettings);
     setIsSettingsOpen(false);
+    setIsActive(false);
+    resetTimer(mode);
   };
 
   const toggleFullScreen = () => {
@@ -138,11 +154,6 @@ export function PomodoroTimer() {
       document.exitFullscreen();
     }
   };
-
-  const manualReset = () => {
-    setIsActive(false);
-    resetTimer(mode);
-  }
 
   return (
     <>
