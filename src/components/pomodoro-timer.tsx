@@ -71,15 +71,7 @@ export function PomodoroTimer() {
         setNotificationPermission(Notification.permission);
       }
 
-      const startAudio = async () => {
-        try {
-            await Tone.start();
-            synth.current = new Tone.Synth().toDestination();
-        } catch (e) {
-            console.error("Failed to initialize audio:", e);
-        }
-      };
-      startAudio();
+      synth.current = new Tone.Synth().toDestination();
 
       const onFullScreenChange = () => {
         setIsFullScreen(!!document.fullscreenElement);
