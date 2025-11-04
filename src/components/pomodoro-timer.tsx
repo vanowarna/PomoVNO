@@ -41,6 +41,7 @@ export function PomodoroTimer() {
   const [isFlashing, setIsFlashing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState('default');
   const isMobile = useIsMobile();
 
   const synth = useRef<Tone.Synth | null>(null);
@@ -61,7 +62,15 @@ export function PomodoroTimer() {
   }, [settings]);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then(permission => {
+          setNotificationPermission(permission);
+        });
+      } else {
+        setNotificationPermission(Notification.permission);
+      }
+
       const startAudio = async () => {
         try {
             await Tone.start();
@@ -81,13 +90,19 @@ export function PomodoroTimer() {
     }
   }, []);
 
+  const showNotification = useCallback((title: string, body: string) => {
+    if (!isMobile && notificationPermission === 'granted') {
+      new Notification(title, { body });
+    }
+  }, [isMobile, notificationPermission]);
+
   const playNotification = useCallback(() => {
     setIsFlashing(true);
     setTimeout(() => setIsFlashing(false), 2000); // Corresponds to 10 flashes over 2s
 
     if (settings.soundEnabled && synth.current && Tone.context.state === 'running') {
         try {
-            synth.current.triggerAttackRelease('C5', '0.5s');
+            synth.current.triggerAttackRelease('C5', '0.5s', Tone.now());
         } catch (e) {
             console.error("Tone.js error:", e);
         }
@@ -109,21 +124,27 @@ export function PomodoroTimer() {
   const advanceMode = useCallback(() => {
     playNotification();
 
+    let nextMode: Mode;
     if (mode === 'work') {
       const newSessions = sessions + 1;
       setSessions(newSessions);
-      const nextMode = newSessions % 4 === 0 ? 'longBreak' : 'shortBreak';
-      setMode(nextMode);
-      setTimeLeft(getTimeForMode(nextMode));
+      nextMode = newSessions % 4 === 0 ? 'longBreak' : 'shortBreak';
     } else {
       if (mode === 'longBreak') {
         setSessions(0);
       }
-      setMode('work');
-      setTimeLeft(getTimeForMode('work'));
+      nextMode = 'work';
     }
+    
+    setMode(nextMode);
+    setTimeLeft(getTimeForMode(nextMode));
+    
+    const notifTitle = nextMode === 'work' ? 'Time to work!' : 'Time for a break!';
+    const notifBody = `Your ${nextMode === 'work' ? settings.work : (nextMode === 'shortBreak' ? settings.shortBreak : settings.longBreak)} minute session has started.`;
+    showNotification(notifTitle, notifBody);
+
     startTimer();
-  }, [mode, sessions, playNotification, getTimeForMode, startTimer]);
+  }, [mode, sessions, playNotification, getTimeForMode, startTimer, showNotification, settings.work, settings.shortBreak, settings.longBreak]);
 
 
   useEffect(() => {
@@ -182,6 +203,10 @@ export function PomodoroTimer() {
     setSessions(0); 
     setMode(newMode);
     setTimeLeft(getTimeForMode(newMode));
+    
+    const notifTitle = newMode === 'work' ? 'Time to work!' : 'Time for a break!';
+    const notifBody = `Your session for ${newMode} has started.`;
+    showNotification(notifTitle, notifBody);
   }
   
   const toggleActive = () => {
