@@ -1,16 +1,63 @@
-# PomoVNO - A Minimalistic Pomodoro Timer
+# PomoVNO
 
-Welcome to PomoVNO! This is a simple yet powerful Pomodoro timer designed to help you stay focused and boost your productivity.
-
-## What is the Pomodoro Technique?
-The Pomodoro Technique is a time management method that uses a timer to break down work into intervals, traditionally 25 minutes in length, separated by short breaks. This trains your brain to focus for short periods and helps you stay on top of deadlines.
+PomoVNO is a minimal, installable, offline-first Pomodoro web app for desktop and mobile.
 
 ## Features
-- **Work, Short Break, & Long Break Timers:** Cycle through focused work sessions and rejuvenating breaks.
-- **Automatic Transitions:** The timer automatically flows from one session to the next without any manual intervention.
-- **Customizable Durations:** Adjust the length of work, short break, and long break sessions to fit your workflow in the settings menu.
-- **Sound & Visual Notifications:** Get notified with a beep and a screen flash when a session ends.
-- **Fullscreen Mode:** Immerse yourself in your work with a distraction-free fullscreen view.
-- **Clean, Minimalist Interface:** A beautiful and simple UI that helps you focus on what matters: your work.
 
-```4S6VNO```
+- Installable PWA (Android/Chrome + desktop Chromium; iOS Add to Home Screen)
+- Offline app shell and local timer state after first successful online load
+- Timestamp-based timer recovery across refresh/background throttling
+- MM:SS timer display (no milliseconds)
+- Work / short break / long break modes with cycle progress
+- Presets: Classic 25/5/15, Extended 50/10/20, Deep Work 90/20/30
+- Auto-start breaks and auto-start work options
+- Skip interval and add +1 minute controls
+- Keyboard shortcuts: Space, R, S, F, 1/2/3
+- Local-only focus label and daily/weekly focus summary
+- Optional sound, visual alerts, and browser notifications
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+App runs at `http://localhost:9002`.
+
+## Production checks
+
+```bash
+npm run typecheck
+npm run lint
+npm run build
+npm start
+```
+
+## Install as PWA
+
+### Android / Chrome / Desktop Chromium
+1. Open the deployed app once while online.
+2. Use browser install UI (or in-app install prompt).
+3. Launch from home screen/app launcher.
+
+### iOS / Safari
+1. Open the deployed app in Safari while online.
+2. Tap **Share** → **Add to Home Screen**.
+3. Launch from the home screen icon.
+
+## Offline behavior
+
+- First load requires internet to cache app shell assets.
+- After successful load/install, the timer UI and local state can run offline.
+- Service worker caches shell/static assets and serves an offline fallback page when navigation cannot be fulfilled.
+- Browser notifications/background behavior may vary by browser and OS policy.
+
+## Verify service worker
+
+1. Open browser devtools → Application (or Storage) → Service Workers.
+2. Confirm `/sw.js` is registered and activated.
+3. Load once online, then switch to offline mode in devtools.
+4. Refresh and confirm app/offline fallback still renders.
+
+`4S6VNO`

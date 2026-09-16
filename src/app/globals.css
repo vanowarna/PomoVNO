@@ -2,10 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  font-family: Arial, Helvetica, sans-serif;
-}
-
 @layer base {
   :root {
     --background: 0 0% 100%;
@@ -90,7 +86,7 @@ body {
 @layer utilities {
   .flash-overlay-animation {
     opacity: 0;
-    animation: flash-opacity 0.2s ease-in-out 10;
+    animation: flash-opacity 0.3s ease-in-out 3;
   }
 
   @keyframes flash-opacity {
@@ -100,6 +96,13 @@ body {
     }
     50% {
       opacity: 0.8;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .flash-overlay-animation {
+        animation: none;
+        opacity: 0;
+      }
     }
   }
 }
