@@ -1,63 +1,70 @@
 # PomoVNO
 
-PomoVNO is a minimal, installable, offline-first Pomodoro web app for desktop and mobile.
+A minimal, free and open source Pomodoro timer. It installs as an app on any phone or desktop and works fully offline.
+
+No accounts, no tracking, no network calls. Everything is stored on your device.
 
 ## Features
 
-- Installable PWA (Android/Chrome + desktop Chromium; iOS Add to Home Screen)
-- Offline app shell and local timer state after first successful online load
-- Timestamp-based timer recovery across refresh/background throttling
-- MM:SS timer display (no milliseconds)
-- Work / short break / long break modes with cycle progress
-- Presets: Classic 25/5/15, Extended 50/10/20, Deep Work 90/20/30
-- Auto-start breaks and auto-start work options
-- Skip interval and add +1 minute controls
-- Keyboard shortcuts: Space, R, S, F, 1/2/3
-- Local-only focus label and daily/weekly focus summary
-- Optional sound, visual alerts, and browser notifications
+- **Offline-first PWA.** After one visit with a connection, the app opens instantly with no network, including in airplane mode.
+- **Accurate timer.** Time is based on the wall clock, not on counting ticks, so it stays correct when the phone sleeps, the tab is throttled, or the app is closed. When you come back, any intervals that finished while you were away are recorded and the cycle picks up where it should be.
+- Focus / short break / long break cycle, with progress dots and a progress bar.
+- Presets: Classic 25/5/15, Extended 50/10/20, Deep Work 90/20/30, or custom durations.
+- Auto-start breaks and/or focus sessions.
+- Alerts: chime, vibration (Android), screen flash, and system notifications. On mobile, notifications go through the service worker.
+- **Keep screen on** while the timer runs (Screen Wake Lock), so alerts fire on time on phones.
+- Today and last-7-days focus summary (local calendar days).
+- Keyboard shortcuts: `Space` start/pause · `R` reset (press twice to reset the cycle) · `S` skip · `+` add a minute · `1 2 3` modes · `F` fullscreen · `?` help.
+- Tabs stay in sync, the remaining time shows in the title bar, and it respects reduced motion.
+
+## Install on your phone
+
+**Android (Chrome, Edge, Samsung Internet):** open the site, tap **Install** in the app (or browser menu → *Install app*).
+
+**iPhone / iPad (Safari):** open the site, tap **Share → Add to Home Screen**. On iOS, notifications need iOS 16.4+ and only work in the installed app.
+
+Open it once while online. After that it works offline. New versions download in the background, and the app offers a **Reload** when one is ready.
+
+### Limits of the web platform
+
+When a phone is locked or the app is in the background, the OS suspends web apps, so an alert can't sound at the exact second. The timer itself stays correct: reopening the app shows the right time and records the finished sessions. For on-time alerts, keep **Keep screen on** enabled (the default) and leave the app open.
 
 ## Development
 
+Requires Node.js 22.18+.
+
 ```bash
 npm install
-npm run dev
+npm run dev        # http://localhost:9002 (service worker disabled in dev)
 ```
-
-App runs at `http://localhost:9002`.
-
-## Production checks
 
 ```bash
+npm test           # unit tests for the timer logic (node:test)
 npm run typecheck
 npm run lint
-npm run build
-npm start
+npm run build && npm start   # production build, service worker enabled
+npm run check      # all of the above
 ```
 
-## Install as PWA
+### Project layout
 
-### Android / Chrome / Desktop Chromium
-1. Open the deployed app once while online.
-2. Use browser install UI (or in-app install prompt).
-3. Launch from home screen/app launcher.
+| Path | Purpose |
+| --- | --- |
+| `src/lib/pomodoro.ts` | Pure timer / cycle / history logic (unit tested) |
+| `src/lib/browser.ts` | Safe wrappers for storage, audio, vibration, notifications |
+| `src/components/pomodoro-timer.tsx` | Main UI |
+| `src/components/settings-modal.tsx` | Settings dialog |
+| `public/sw.js` | Service worker (offline app shell, caching, notification clicks) |
+| `public/manifest.webmanifest` | PWA manifest |
 
-### iOS / Safari
-1. Open the deployed app in Safari while online.
-2. Tap **Share** → **Add to Home Screen**.
-3. Launch from the home screen icon.
+### Verify offline support
 
-## Offline behavior
+1. `npm run build && npm start`, then open `http://localhost:3000`.
+2. DevTools → Application → Service Workers: `/sw.js` is activated. Cache Storage → `pomovno-shell-*` contains `/` plus its JS/CSS.
+3. Network tab → **Offline**, then reload. The app loads and the timer works.
 
-- First load requires internet to cache app shell assets.
-- After successful load/install, the timer UI and local state can run offline.
-- Service worker caches shell/static assets and serves an offline fallback page when navigation cannot be fulfilled.
-- Browser notifications/background behavior may vary by browser and OS policy.
+## License
 
-## Verify service worker
-
-1. Open browser devtools → Application (or Storage) → Service Workers.
-2. Confirm `/sw.js` is registered and activated.
-3. Load once online, then switch to offline mode in devtools.
-4. Refresh and confirm app/offline fallback still renders.
+[MIT](LICENSE). Free to use, modify and share.
 
 `4S6VNO`

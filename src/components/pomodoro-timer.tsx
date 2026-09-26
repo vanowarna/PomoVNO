@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Download,
   Expand,
+  Keyboard,
   Pause,
   Play,
   Plus,
@@ -10,35 +12,52 @@ import {
   Settings as SettingsIcon,
   Shrink,
   SkipForward,
-  Keyboard,
-  Wifi,
   WifiOff,
-  Download,
+  X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { SettingsModal } from '@/components/settings-modal';
-import { useToast } from '@/hooks/use-toast';
+import { toast } from '@/hooks/use-toast';
+import { useWakeLock } from '@/hooks/use-wake-lock';
 import {
-  addWorkSessionToHistory,
-  clampRemainingMs,
+  addTimeToSnapshot,
+  advanceTimer,
+  createIdleSnapshot,
   DEFAULT_SETTINGS,
+  formatMinutes,
   formatTimerMs,
   getModeDurationMs,
-  getNextMode,
-  getTodayKey,
-  PRESETS,
+  getRecentSummary,
+  MINUTE_MS,
+  MODE_LABELS,
+  pauseSnapshot,
+  pruneHistory,
+  recordCompletedIntervals,
   safeParseJSON,
-  shouldAutoStart,
+  sanitizeHistory,
+  sanitizeSnapshot,
+  startSnapshot,
   STORAGE_KEYS,
+  transitionToNext,
+  validateSettings,
+  type CompletedInterval,
   type DailyHistory,
   type Mode,
   type PomodoroSettings,
   type TimerSnapshot,
-  validateSettings,
 } from '@/lib/pomodoro';
+import {
+  getNotificationPermission,
+  playChime,
+  requestNotificationPermission,
+  showSystemNotification,
+  storage,
+  unlockAudio,
+  vibrate,
+} from '@/lib/browser';
 import { cn } from '@/lib/utils';
 
 interface BeforeInstallPromptEvent extends Event {
@@ -46,421 +65,267 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 }
 
-const INITIAL_STATE: TimerSnapshot = {
-  mode: 'work',
-  isRunning: false,
-  remainingMs: getModeDurationMs('work', DEFAULT_SETTINGS),
-  endTimestamp: null,
-  completedWorkSessionsInCycle: 0,
-};
+type NotificationState = NotificationPermission | 'unsupported';
+
+const TICK_MS = 250;
+/** Completions older than this happened while the app was closed/frozen: summarise instead of alarming. */
+const STALE_COMPLETION_MS = 60_000;
+const DEFAULT_TITLE = 'PomoVNO · Pomodoro Timer';
+
+const isEditableTarget = (target: EventTarget | null) =>
+  target instanceof HTMLElement &&
+  (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+
+const isActivatableTarget = (target: EventTarget | null) =>
+  target instanceof HTMLElement && (target.tagName === 'BUTTON' || target.getAttribute('role') === 'tab');
 
 export function PomodoroTimer() {
-  const { toast } = useToast();
   const [settings, setSettings] = useState<PomodoroSettings>(DEFAULT_SETTINGS);
-  const [timer, setTimer] = useState<TimerSnapshot>(INITIAL_STATE);
-  const [dailyHistory, setDailyHistory] = useState<DailyHistory>({});
+  const [timer, setTimer] = useState<TimerSnapshot>(() => createIdleSnapshot('work', DEFAULT_SETTINGS));
+  const [history, setHistory] = useState<DailyHistory>({});
   const [focusLabel, setFocusLabel] = useState('');
   const [isHydrated, setIsHydrated] = useState(false);
-  const [isFlashing, setIsFlashing] = useState(false);
+  const [flashKey, setFlashKey] = useState(0);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [canFullscreen, setCanFullscreen] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
-  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | 'unsupported'>('unsupported');
+  const [notificationPermission, setNotificationPermission] = useState<NotificationState>('unsupported');
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [installDismissed, setInstallDismissed] = useState(false);
-  const [liveAnnouncement, setLiveAnnouncement] = useState('');
+  const [installHint, setInstallHint] = useState<'none' | 'ios'>('none');
+  const [installDismissed, setInstallDismissed] = useState(true);
+  const [announcement, setAnnouncement] = useState('');
 
+  // Refs are the source of truth for event handlers, so rapid events (tick + focus + key)
+  // never act on a stale snapshot and an interval can never be completed twice.
   const timerRef = useRef(timer);
   const settingsRef = useRef(settings);
-  const intervalRef = useRef<number | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const historyRef = useRef(history);
+  const focusLabelRef = useRef(focusLabel);
 
-  const isStandalone = useMemo(() => {
-    if (typeof window === 'undefined') return false;
-    return window.matchMedia('(display-mode: standalone)').matches || (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
+  useWakeLock(isHydrated && timer.isRunning && settings.keepScreenAwake);
+
+  const commit = useCallback((next: TimerSnapshot, persist = true) => {
+    timerRef.current = next;
+    setTimer(next);
+    if (persist) storage.set(STORAGE_KEYS.timer, JSON.stringify(next));
   }, []);
 
-  const todaySummary = dailyHistory[getTodayKey()] ?? { sessions: 0, focusMinutes: 0 };
+  const handleCompletions = useCallback(
+    (completed: CompletedInterval[], next: TimerSnapshot, now: number) => {
+      if (completed.length === 0) return;
 
-  const weeklySummary = useMemo(() => {
-    const keys = Object.keys(dailyHistory).sort().slice(-7);
-    return keys.reduce(
-      (acc, key) => {
-        acc.sessions += dailyHistory[key].sessions;
-        acc.focusMinutes += dailyHistory[key].focusMinutes;
-        return acc;
-      },
-      { sessions: 0, focusMinutes: 0 }
-    );
-  }, [dailyHistory]);
+      const nextHistory = pruneHistory(recordCompletedIntervals(historyRef.current, completed));
+      historyRef.current = nextHistory;
+      setHistory(nextHistory);
+      storage.set(STORAGE_KEYS.history, JSON.stringify(nextHistory));
 
-  useEffect(() => {
-    timerRef.current = timer;
-  }, [timer]);
+      const last = completed[completed.length - 1];
+      const nextLabel = MODE_LABELS[next.mode];
+      const message = `${MODE_LABELS[last.mode]} finished. ${nextLabel} ${next.isRunning ? 'started' : 'is ready'}.`;
+      setAnnouncement(message);
 
-  useEffect(() => {
-    settingsRef.current = settings;
-  }, [settings]);
-
-  const persistTimer = useCallback((nextTimer: TimerSnapshot) => {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem(STORAGE_KEYS.timer, JSON.stringify(nextTimer));
-  }, []);
-
-  const updateTimer = useCallback(
-    (updater: (prev: TimerSnapshot) => TimerSnapshot) => {
-      setTimer((prev) => {
-        const next = updater(prev);
-        persistTimer(next);
-        return next;
-      });
-    },
-    [persistTimer]
-  );
-
-  const playSound = useCallback(() => {
-    if (!settingsRef.current.soundEnabled || typeof window === 'undefined') {
-      return;
-    }
-
-    const context = audioContextRef.current;
-    if (!context || context.state !== 'running') {
-      return;
-    }
-
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = 'sine';
-    oscillator.frequency.value = 880;
-    gain.gain.value = 0.001;
-    gain.gain.exponentialRampToValueAtTime(0.2, context.currentTime + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.35);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.35);
-  }, []);
-
-  const ensureAudioReady = useCallback(async () => {
-    if (typeof window === 'undefined' || !settingsRef.current.soundEnabled) {
-      return;
-    }
-
-    if (!audioContextRef.current) {
-      const Ctx = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!Ctx) {
+      if (now - last.endedAt > STALE_COMPLETION_MS) {
+        const focusCount = completed.filter((item) => item.mode === 'work').length;
+        toast({
+          title: 'Welcome back',
+          description:
+            focusCount > 0
+              ? `${focusCount} focus session${focusCount === 1 ? '' : 's'} finished while you were away. ${message}`
+              : message,
+        });
         return;
       }
-      audioContextRef.current = new Ctx();
-    }
 
-    if (audioContextRef.current.state === 'suspended') {
-      await audioContextRef.current.resume();
-    }
-  }, []);
+      const current = settingsRef.current;
+      const kind = next.mode === 'work' ? 'work' : 'break';
+      if (current.soundEnabled) playChime(kind);
+      if (current.vibrationEnabled) vibrate(kind === 'work' ? [300, 120, 300, 120, 300] : [200, 100, 200]);
+      if (current.visualAlerts) setFlashKey((key) => key + 1);
+      if (current.notificationsEnabled && (document.visibilityState !== 'visible' || !document.hasFocus())) {
+        const focus = focusLabelRef.current.trim();
+        void showSystemNotification(
+          kind === 'work' ? 'Back to focus' : 'Time for a break',
+          focus && kind === 'work' ? `${message} Focus: ${focus}` : message
+        );
+      }
+    },
+    []
+  );
 
-  const requestNotificationPermission = useCallback(async () => {
-    if (typeof window === 'undefined' || !('Notification' in window)) {
-      setNotificationPermission('unsupported');
-      return;
-    }
-
-    const permission = await window.Notification.requestPermission();
-    setNotificationPermission(permission);
-    if (permission === 'denied') {
-      toast({
-        title: 'Notifications blocked',
-        description: 'Enable notifications in browser settings if you want alerts.',
-      });
-    }
-  }, [toast]);
-
-  const showCompletionNotification = useCallback((title: string, body: string) => {
-    if (typeof window === 'undefined' || !('Notification' in window)) return;
-    if (!settingsRef.current.notificationsEnabled || notificationPermission !== 'granted') return;
-
-    try {
-      new window.Notification(title, { body });
-    } catch {
-      // ignore browser-specific failures
-    }
-  }, [notificationPermission]);
-
-  const completeInterval = useCallback((manualSkip = false, completionTimestamp = Date.now()) => {
+  const tick = useCallback(() => {
     const current = timerRef.current;
-    const currentSettings = settingsRef.current;
-    const modeLabel = current.mode === 'work' ? 'Work' : current.mode === 'shortBreak' ? 'Short break' : 'Long break';
-
-    if (!manualSkip && current.mode === 'work') {
-      setDailyHistory((prev) => {
-        const next = addWorkSessionToHistory(prev, currentSettings.work);
-        if (typeof window !== 'undefined') {
-          window.localStorage.setItem(STORAGE_KEYS.history, JSON.stringify(next));
-        }
-        return next;
-      });
-    }
-
-    const { nextMode, nextCompletedInCycle } = getNextMode(
-      current.mode,
-      current.completedWorkSessionsInCycle,
-      currentSettings
-    );
-    const nextDuration = getModeDurationMs(nextMode, currentSettings);
-    const autoStart = shouldAutoStart(nextMode, currentSettings);
-
-    if (currentSettings.visualAlerts && !manualSkip) {
-      setIsFlashing(true);
-      window.setTimeout(() => setIsFlashing(false), 900);
-    }
-
-    if (!manualSkip) {
-      playSound();
-      showCompletionNotification(
-        nextMode === 'work' ? 'Back to focus' : 'Time for a break',
-        `${modeLabel} ended. ${nextMode === 'work' ? 'Start focusing again.' : 'Take a mindful break.'}`
-      );
-    }
-
-    setLiveAnnouncement(
-      manualSkip
-        ? `Skipped ${modeLabel}. ${nextMode === 'work' ? 'Work session ready.' : 'Break ready.'}`
-        : `${modeLabel} finished. ${nextMode === 'work' ? 'Work session ready.' : 'Break ready.'}`
-    );
-
-    updateTimer(() => ({
-      mode: nextMode,
-      completedWorkSessionsInCycle: nextCompletedInCycle,
-      isRunning: autoStart && !manualSkip,
-      remainingMs: nextDuration,
-      endTimestamp: autoStart && !manualSkip ? completionTimestamp + nextDuration : null,
-    }));
-  }, [playSound, showCompletionNotification, updateTimer]);
-
-  const syncFromClock = useCallback(() => {
-    const current = timerRef.current;
-    if (!current.isRunning || !current.endTimestamp) return;
-
+    if (!current.isRunning) return;
     const now = Date.now();
-    const remaining = current.endTimestamp - now;
-    if (remaining <= 0) {
-      completeInterval(false, current.endTimestamp);
-      return;
+    const { timer: next, completed } = advanceTimer(current, settingsRef.current, now);
+    if (completed.length > 0) {
+      commit(next);
+      handleCompletions(completed, next, now);
+    } else if (Math.ceil(next.remainingMs / 1000) !== Math.ceil(current.remainingMs / 1000)) {
+      // Running state is derived from endTimestamp, so per-second updates need no persistence.
+      commit(next, false);
     }
+  }, [commit, handleCompletions]);
 
-    updateTimer((prev) => ({
-      ...prev,
-      remainingMs: clampRemainingMs(remaining),
-    }));
-  }, [completeInterval, updateTimer]);
-
-  const startTimer = useCallback(async () => {
-    await ensureAudioReady();
-    updateTimer((prev) => {
-      if (prev.isRunning) return prev;
-      const duration = clampRemainingMs(prev.remainingMs);
-      return {
-        ...prev,
-        isRunning: true,
-        remainingMs: duration,
-        endTimestamp: Date.now() + duration,
-      };
-    });
-  }, [ensureAudioReady, updateTimer]);
+  const startTimer = useCallback(() => {
+    void unlockAudio();
+    const current = timerRef.current;
+    if (current.isRunning) return;
+    commit(startSnapshot(current, Date.now()));
+    setAnnouncement(`${MODE_LABELS[current.mode]} started.`);
+  }, [commit]);
 
   const pauseTimer = useCallback(() => {
-    updateTimer((prev) => {
-      if (!prev.isRunning || !prev.endTimestamp) {
-        return { ...prev, isRunning: false, endTimestamp: null };
-      }
-      return {
-        ...prev,
-        isRunning: false,
-        remainingMs: clampRemainingMs(prev.endTimestamp - Date.now()),
-        endTimestamp: null,
-      };
-    });
-  }, [updateTimer]);
+    const current = timerRef.current;
+    if (!current.isRunning) return;
+    commit(pauseSnapshot(current, Date.now()));
+    setAnnouncement('Paused.');
+  }, [commit]);
+
+  const toggleTimer = useCallback(() => {
+    if (timerRef.current.isRunning) pauseTimer();
+    else startTimer();
+  }, [pauseTimer, startTimer]);
 
   const resetTimer = useCallback(() => {
-    updateTimer((prev) => ({
-      ...prev,
-      isRunning: false,
-      endTimestamp: null,
-      remainingMs: getModeDurationMs(prev.mode, settingsRef.current),
-      completedWorkSessionsInCycle: prev.mode === 'work' ? 0 : prev.completedWorkSessionsInCycle,
-    }));
-    setLiveAnnouncement('Timer reset.');
-  }, [updateTimer]);
+    const current = timerRef.current;
+    const fullDuration = getModeDurationMs(current.mode, settingsRef.current);
+    const alreadyFresh = !current.isRunning && current.remainingMs === fullDuration && current.durationMs === fullDuration;
+    // Resetting an untouched timer resets the whole cycle.
+    const keepCycle = alreadyFresh ? 0 : current.completedWorkSessionsInCycle;
+    commit(createIdleSnapshot(current.mode, settingsRef.current, keepCycle));
+    setAnnouncement(alreadyFresh ? 'Cycle reset.' : 'Timer reset.');
+  }, [commit]);
 
   const skipInterval = useCallback(() => {
-    completeInterval(true, Date.now());
-  }, [completeInterval]);
+    const now = Date.now();
+    const current = timerRef.current;
+    const next = transitionToNext(pauseSnapshot(current, now), settingsRef.current, now, { skipped: true });
+    commit(next);
+    setAnnouncement(`Skipped ${MODE_LABELS[current.mode].toLowerCase()}. ${MODE_LABELS[next.mode]} is ready.`);
+  }, [commit]);
 
   const addOneMinute = useCallback(() => {
-    updateTimer((prev) => {
-      const nextRemaining = clampRemainingMs(prev.remainingMs + 60_000);
-      return {
-        ...prev,
-        remainingMs: nextRemaining,
-        endTimestamp: prev.isRunning ? Date.now() + nextRemaining : null,
-      };
-    });
-    setLiveAnnouncement('Added one minute.');
-  }, [updateTimer]);
+    commit(addTimeToSnapshot(timerRef.current, MINUTE_MS, Date.now()));
+    setAnnouncement('Added one minute.');
+  }, [commit]);
 
-  const switchMode = useCallback((nextMode: Mode) => {
-    updateTimer((prev) => ({
-      ...prev,
-      mode: nextMode,
-      isRunning: false,
-      endTimestamp: null,
-      remainingMs: getModeDurationMs(nextMode, settingsRef.current),
-      completedWorkSessionsInCycle: nextMode === 'work' ? 0 : prev.completedWorkSessionsInCycle,
-    }));
-    setLiveAnnouncement(`${nextMode === 'work' ? 'Work' : nextMode === 'shortBreak' ? 'Short break' : 'Long break'} selected.`);
-  }, [updateTimer]);
+  const switchMode = useCallback(
+    (mode: Mode) => {
+      const current = timerRef.current;
+      if (mode === current.mode) return;
+      commit(createIdleSnapshot(mode, settingsRef.current, current.completedWorkSessionsInCycle));
+      setAnnouncement(`${MODE_LABELS[mode]} selected.`);
+    },
+    [commit]
+  );
 
-  const saveSettings = useCallback(async (nextSettings: PomodoroSettings) => {
-    setSettings(nextSettings);
-
-    if (nextSettings.notificationsEnabled && notificationPermission === 'default') {
-      await requestNotificationPermission();
+  const askNotificationPermission = useCallback(async () => {
+    const permission = await requestNotificationPermission();
+    setNotificationPermission(permission);
+    if (permission === 'denied') {
+      toast({ title: 'Notifications blocked', description: 'Allow notifications for this site in your browser settings.' });
     }
+    return permission;
+  }, []);
 
-    updateTimer((prev) => {
-      const nextRemaining = getModeDurationMs(prev.mode, nextSettings);
-      return {
-        ...prev,
-        isRunning: false,
-        endTimestamp: null,
-        remainingMs: nextRemaining,
-      };
-    });
-    setLiveAnnouncement('Settings saved.');
-  }, [notificationPermission, requestNotificationPermission, updateTimer]);
+  const saveSettings = useCallback(
+    (next: PomodoroSettings) => {
+      settingsRef.current = next;
+      setSettings(next);
+      storage.set(STORAGE_KEYS.settings, JSON.stringify(next));
 
-  const applyPreset = useCallback((presetKey: string) => {
-    const preset = PRESETS.find((item) => item.key === presetKey);
-    if (!preset) return;
-
-    const merged = validateSettings({ ...settingsRef.current, ...preset.values }).settings;
-    setSettings(merged);
-    updateTimer((prev) => ({
-      ...prev,
-      isRunning: false,
-      endTimestamp: null,
-      remainingMs: getModeDurationMs(prev.mode, merged),
-    }));
-    setLiveAnnouncement(`${preset.label} preset applied.`);
-  }, [updateTimer]);
+      // Only an untouched, idle timer picks up a new duration right away; a running or
+      // paused interval keeps its length and the new durations apply from the next one.
+      const current = timerRef.current;
+      const untouched = !current.isRunning && current.remainingMs === current.durationMs;
+      if (untouched && getModeDurationMs(current.mode, next) !== current.durationMs) {
+        commit(createIdleSnapshot(current.mode, next, current.completedWorkSessionsInCycle));
+      }
+      setAnnouncement('Settings saved.');
+    },
+    [commit]
+  );
 
   const toggleFullscreen = useCallback(async () => {
-    if (typeof document === 'undefined') return;
-
     try {
-      if (!document.fullscreenElement) {
-        if (document.documentElement.requestFullscreen) {
-          await document.documentElement.requestFullscreen();
-        }
-      } else if (document.exitFullscreen) {
-        await document.exitFullscreen();
-      }
+      if (!document.fullscreenElement) await document.documentElement.requestFullscreen?.();
+      else await document.exitFullscreen?.();
     } catch {
-      toast({ title: 'Fullscreen unavailable', description: 'Your browser does not allow fullscreen mode here.' });
+      toast({ title: 'Fullscreen unavailable', description: 'Your browser does not allow fullscreen here.' });
     }
-  }, [toast]);
+  }, []);
 
   const triggerInstall = useCallback(async () => {
     if (!deferredPrompt) return;
-    await deferredPrompt.prompt();
-    await deferredPrompt.userChoice;
-    setDeferredPrompt(null);
+    try {
+      await deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+    } finally {
+      setDeferredPrompt(null);
+    }
   }, [deferredPrompt]);
 
-  const dismissInstallPrompt = useCallback(() => {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(STORAGE_KEYS.installPromptDismissed, '1');
-    }
+  const dismissInstall = useCallback(() => {
+    storage.set(STORAGE_KEYS.installPromptDismissed, '1');
     setInstallDismissed(true);
   }, []);
 
+  // Hydrate from storage and wire up global listeners (once).
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    const loadedSettings = validateSettings(safeParseJSON(storage.get(STORAGE_KEYS.settings))).settings;
+    settingsRef.current = loadedSettings;
+    setSettings(loadedSettings);
 
-    setIsOnline(window.navigator.onLine);
-    const savedDismissal = window.localStorage.getItem(STORAGE_KEYS.installPromptDismissed);
-    setInstallDismissed(savedDismissal === '1');
+    const loadedHistory = sanitizeHistory(safeParseJSON(storage.get(STORAGE_KEYS.history)));
+    historyRef.current = loadedHistory;
+    setHistory(loadedHistory);
 
-    const savedSettings = safeParseJSON<Partial<PomodoroSettings>>(window.localStorage.getItem(STORAGE_KEYS.settings));
-    const validatedSettings = validateSettings(savedSettings ?? {}).settings;
-    setSettings(validatedSettings);
+    const loadedFocus = (storage.get(STORAGE_KEYS.focus) ?? '').slice(0, 80);
+    focusLabelRef.current = loadedFocus;
+    setFocusLabel(loadedFocus);
 
-    const savedTimer = safeParseJSON<TimerSnapshot>(window.localStorage.getItem(STORAGE_KEYS.timer));
-    if (savedTimer) {
-      const sanitizedTimer: TimerSnapshot = {
-        mode: savedTimer.mode,
-        isRunning: Boolean(savedTimer.isRunning),
-        remainingMs: clampRemainingMs(savedTimer.remainingMs),
-        endTimestamp: savedTimer.endTimestamp,
-        completedWorkSessionsInCycle: Math.max(0, Math.round(savedTimer.completedWorkSessionsInCycle || 0)),
-      };
+    const now = Date.now();
+    const saved =
+      sanitizeSnapshot(safeParseJSON(storage.get(STORAGE_KEYS.timer)), loadedSettings) ??
+      createIdleSnapshot('work', loadedSettings);
+    const { timer: restored, completed } = advanceTimer(saved, loadedSettings, now);
+    commit(restored);
+    handleCompletions(completed, restored, now);
 
-      if (sanitizedTimer.isRunning && sanitizedTimer.endTimestamp) {
-        const remaining = sanitizedTimer.endTimestamp - Date.now();
-        if (remaining > 0) {
-          sanitizedTimer.remainingMs = remaining;
-        } else {
-          sanitizedTimer.isRunning = false;
-          sanitizedTimer.endTimestamp = null;
-          sanitizedTimer.remainingMs = getModeDurationMs(sanitizedTimer.mode, validatedSettings);
-        }
-      }
+    setNotificationPermission(getNotificationPermission());
+    setIsOnline(navigator.onLine);
+    setCanFullscreen(Boolean(document.fullscreenEnabled));
 
-      setTimer(sanitizedTimer);
-      persistTimer(sanitizedTimer);
-    } else {
-      const first = {
-        ...INITIAL_STATE,
-        remainingMs: getModeDurationMs('work', validatedSettings),
-      };
-      setTimer(first);
-      persistTimer(first);
-    }
-
-    const savedHistory = safeParseJSON<DailyHistory>(window.localStorage.getItem(STORAGE_KEYS.history));
-    if (savedHistory) {
-      setDailyHistory(savedHistory);
-    }
-
-    const savedFocus = window.localStorage.getItem(STORAGE_KEYS.focus);
-    if (savedFocus) {
-      setFocusLabel(savedFocus);
-    }
-
-    if ('Notification' in window) {
-      setNotificationPermission(window.Notification.permission);
-    } else {
-      setNotificationPermission('unsupported');
-    }
+    const nav = navigator as Navigator & { standalone?: boolean };
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || nav.standalone === true;
+    const isIos = /iphone|ipad|ipod/i.test(nav.userAgent) || (nav.platform === 'MacIntel' && nav.maxTouchPoints > 1);
+    setInstallHint(isIos && !isStandalone ? 'ios' : 'none');
+    setInstallDismissed(isStandalone || storage.get(STORAGE_KEYS.installPromptDismissed) === '1');
 
     const onOnline = () => setIsOnline(true);
     const onOffline = () => setIsOnline(false);
     const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
-
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-
     const onBeforeInstallPrompt = (event: Event) => {
       event.preventDefault();
       setDeferredPrompt(event as BeforeInstallPromptEvent);
     };
-    const onAppInstalled = () => setDeferredPrompt(null);
+    const onAppInstalled = () => {
+      setDeferredPrompt(null);
+      setInstallDismissed(true);
+    };
+    // Mobile browsers only allow audio after a gesture; resume on every gesture since iOS
+    // suspends the context again whenever the app is backgrounded.
+    const onGesture = () => void unlockAudio();
 
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
     window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt);
     window.addEventListener('appinstalled', onAppInstalled);
+    window.addEventListener('pointerdown', onGesture, { passive: true });
+    window.addEventListener('keydown', onGesture);
 
     setIsHydrated(true);
 
@@ -470,262 +335,258 @@ export function PomodoroTimer() {
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
       window.removeEventListener('appinstalled', onAppInstalled);
+      window.removeEventListener('pointerdown', onGesture);
+      window.removeEventListener('keydown', onGesture);
     };
-  }, [persistTimer]);
+  }, [commit, handleCompletions]);
+
+  // Clock: poll the wall clock while running, and re-sync whenever the page wakes up.
+  useEffect(() => {
+    if (!timer.isRunning) return;
+    const id = window.setInterval(tick, TICK_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', tick);
+    window.addEventListener('pageshow', tick);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', tick);
+      window.removeEventListener('pageshow', tick);
+    };
+  }, [tick, timer.isRunning]);
+
+  // Keep other tabs of the app in sync.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEYS.timer) {
+        const next = sanitizeSnapshot(safeParseJSON(event.newValue), settingsRef.current);
+        if (next) commit(advanceTimer(next, settingsRef.current, Date.now()).timer, false);
+      } else if (event.key === STORAGE_KEYS.settings) {
+        const next = validateSettings(safeParseJSON(event.newValue)).settings;
+        settingsRef.current = next;
+        setSettings(next);
+      } else if (event.key === STORAGE_KEYS.history) {
+        const next = sanitizeHistory(safeParseJSON(event.newValue));
+        historyRef.current = next;
+        setHistory(next);
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [commit]);
 
   useEffect(() => {
-    if (!isHydrated || typeof window === 'undefined') return;
-    window.localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings));
-  }, [isHydrated, settings]);
-
-  useEffect(() => {
-    if (!isHydrated || typeof window === 'undefined') return;
-    window.localStorage.setItem(STORAGE_KEYS.focus, focusLabel);
+    focusLabelRef.current = focusLabel;
+    if (isHydrated) storage.set(STORAGE_KEYS.focus, focusLabel);
   }, [focusLabel, isHydrated]);
 
   useEffect(() => {
-    if (!timer.isRunning) {
-      if (intervalRef.current) {
-        window.clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      return;
-    }
-
-    syncFromClock();
-    intervalRef.current = window.setInterval(syncFromClock, 1000);
-
-    return () => {
-      if (intervalRef.current) {
-        window.clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [syncFromClock, timer.isRunning]);
+    const started = timer.isRunning || timer.remainingMs < timer.durationMs;
+    document.title = started
+      ? `${timer.isRunning ? '' : '⏸ '}${formatTimerMs(timer.remainingMs)} · ${MODE_LABELS[timer.mode]} | PomoVNO`
+      : DEFAULT_TITLE;
+  }, [timer.durationMs, timer.isRunning, timer.mode, timer.remainingMs]);
 
   useEffect(() => {
-    if (!isHydrated || typeof window === 'undefined') return;
-
-    const reSync = () => syncFromClock();
-    const onPageShow = () => syncFromClock();
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        syncFromClock();
-      }
-    };
-
-    window.addEventListener('focus', reSync);
-    window.addEventListener('pageshow', onPageShow);
-    window.addEventListener('online', reSync);
-    document.addEventListener('visibilitychange', onVisibility);
-
-    return () => {
-      window.removeEventListener('focus', reSync);
-      window.removeEventListener('pageshow', onPageShow);
-      window.removeEventListener('online', reSync);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [isHydrated, syncFromClock]);
-
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const modeLabel = timer.mode === 'work' ? 'WORK' : 'BREAK';
-    document.title = timer.isRunning ? `(${formatTimerMs(timer.remainingMs)}) ${modeLabel} | PomoVNO` : 'Pomodoro Timer | Vano';
-  }, [timer.isRunning, timer.mode, timer.remainingMs]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const isEditableTarget = (target: EventTarget | null): boolean => {
-      if (!(target instanceof HTMLElement)) return false;
-      return (
-        target.isContentEditable ||
-        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
-      );
-    };
-
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
       if (isEditableTarget(event.target) || isSettingsOpen) return;
 
       const key = event.key.toLowerCase();
-      if (key === ' ' || event.code === 'Space') {
+      if (key === ' ') {
+        // Let a focused button/tab handle its own Space activation.
+        if (isActivatableTarget(event.target)) return;
         event.preventDefault();
-        if (timerRef.current.isRunning) {
-          pauseTimer();
-        } else {
-          void startTimer();
-        }
+        toggleTimer();
         return;
       }
 
-      if (key === 'r') {
-        event.preventDefault();
-        resetTimer();
-      } else if (key === 's') {
-        event.preventDefault();
-        skipInterval();
-      } else if (key === 'f') {
-        event.preventDefault();
-        void toggleFullscreen();
-      } else if (key === '1') {
-        event.preventDefault();
-        switchMode('work');
-      } else if (key === '2') {
-        event.preventDefault();
-        switchMode('shortBreak');
-      } else if (key === '3') {
-        event.preventDefault();
-        switchMode('longBreak');
-      } else if (key === '?') {
-        event.preventDefault();
-        setIsHelpOpen((prev) => !prev);
-      }
+      const actions: Record<string, () => void> = {
+        r: resetTimer,
+        s: skipInterval,
+        '+': addOneMinute,
+        '=': addOneMinute,
+        f: () => void toggleFullscreen(),
+        '1': () => switchMode('work'),
+        '2': () => switchMode('shortBreak'),
+        '3': () => switchMode('longBreak'),
+        '?': () => setIsHelpOpen((open) => !open),
+      };
+      const action = actions[key];
+      if (!action || (key === 'f' && !canFullscreen)) return;
+      event.preventDefault();
+      action();
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isSettingsOpen, pauseTimer, resetTimer, skipInterval, startTimer, switchMode, toggleFullscreen]);
+  }, [addOneMinute, canFullscreen, isSettingsOpen, resetTimer, skipInterval, switchMode, toggleFullscreen, toggleTimer]);
 
-  useEffect(() => {
-    return () => {
-      if (intervalRef.current) {
-        window.clearInterval(intervalRef.current);
-      }
-      if (audioContextRef.current) {
-        void audioContextRef.current.close();
-      }
-    };
-  }, []);
-
-  const cycleProgress = Math.min(timer.completedWorkSessionsInCycle, settings.longBreakInterval);
-  const modeText = timer.mode === 'work' ? 'Focus' : timer.mode === 'shortBreak' ? 'Short Break' : 'Long Break';
-
-  const showInstallCard = !isStandalone && !installDismissed;
-  const showIosHint = typeof window !== 'undefined' && /iphone|ipad|ipod/i.test(window.navigator.userAgent) && !('standalone' in window.navigator && (window.navigator as Navigator & { standalone?: boolean }).standalone);
+  const today = getRecentSummary(history, 1);
+  const week = getRecentSummary(history, 7);
+  const progress = timer.durationMs > 0 ? 1 - timer.remainingMs / timer.durationMs : 0;
+  const cycleLength = settings.longBreakInterval;
+  const cycleDone = Math.min(timer.completedWorkSessionsInCycle, cycleLength);
+  const showInstall = !installDismissed && (deferredPrompt !== null || installHint === 'ios');
 
   return (
     <>
-      {isFlashing ? <div className="pointer-events-none fixed inset-0 z-[100] bg-white/40 flash-overlay-animation" /> : null}
+      {flashKey > 0 ? (
+        <div key={flashKey} className="flash-overlay-animation pointer-events-none fixed inset-0 z-[100] bg-white" aria-hidden="true" />
+      ) : null}
 
       <div aria-live="polite" className="sr-only">
-        {liveAnnouncement}
+        {announcement}
       </div>
 
-      <div className="w-full max-w-3xl space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/20 px-3 py-1 text-xs text-muted-foreground" role="status" aria-live="polite">
-            {isOnline ? <Wifi className="h-3.5 w-3.5" aria-hidden="true" /> : <WifiOff className="h-3.5 w-3.5" aria-hidden="true" />}
-            {isOnline ? 'Online' : 'Offline'}
+      <div className="w-full max-w-xl space-y-4">
+        <header className="flex items-center justify-between gap-2">
+          <div className="min-h-6 text-xs text-muted-foreground" role="status">
+            {!isOnline ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-white/20 px-2.5 py-1">
+                <WifiOff className="h-3.5 w-3.5" aria-hidden="true" /> Offline
+              </span>
+            ) : null}
           </div>
 
-          <div className="flex items-center gap-2">
-            <Button onClick={() => setIsHelpOpen((prev) => !prev)} variant="ghost" size="icon" aria-label="Keyboard shortcuts">
+          <div className="flex items-center gap-1">
+            <Button onClick={() => setIsHelpOpen((open) => !open)} variant="ghost" size="icon" aria-label="Keyboard shortcuts" aria-expanded={isHelpOpen} className="hidden sm:inline-flex">
               <Keyboard className="h-5 w-5" />
             </Button>
             <Button onClick={() => setIsSettingsOpen(true)} variant="ghost" size="icon" aria-label="Settings">
               <SettingsIcon className="h-5 w-5" />
             </Button>
-            <Button onClick={toggleFullscreen} variant="ghost" size="icon" aria-label="Toggle fullscreen">
-              {isFullscreen ? <Shrink className="h-5 w-5" /> : <Expand className="h-5 w-5" />}
-            </Button>
+            {canFullscreen ? (
+              <Button onClick={toggleFullscreen} variant="ghost" size="icon" aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
+                {isFullscreen ? <Shrink className="h-5 w-5" /> : <Expand className="h-5 w-5" />}
+              </Button>
+            ) : null}
           </div>
-        </div>
+        </header>
 
-        {showInstallCard && (deferredPrompt || showIosHint) ? (
-          <div className="rounded-xl border border-white/20 bg-card/60 p-3 text-sm">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="font-medium">Install PomoVNO</p>
-                <p className="text-muted-foreground">
-                  {deferredPrompt
-                    ? 'Install for quick access and offline timer usage after first load.'
-                    : 'On iOS Safari: tap Share, then “Add to Home Screen”.'}
-                </p>
-              </div>
-              <div className="flex gap-2">
-                {deferredPrompt ? (
-                  <Button size="sm" onClick={triggerInstall}>
-                    <Download className="mr-1 h-4 w-4" /> Install
-                  </Button>
-                ) : null}
-                <Button size="sm" variant="outline" onClick={dismissInstallPrompt}>
-                  Dismiss
+        {showInstall ? (
+          <div className="flex items-start justify-between gap-3 rounded-xl border border-white/15 bg-card/60 p-3 text-sm">
+            <div>
+              <p className="font-medium">Install PomoVNO</p>
+              <p className="text-muted-foreground">
+                {deferredPrompt ? 'Add it to your home screen. It works fully offline.' : 'Tap Share, then “Add to Home Screen” to use it offline.'}
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              {deferredPrompt ? (
+                <Button size="sm" onClick={triggerInstall}>
+                  <Download className="mr-1 h-4 w-4" /> Install
                 </Button>
-              </div>
+              ) : null}
+              <Button size="icon" variant="ghost" className="h-9 w-9" onClick={dismissInstall} aria-label="Dismiss install prompt">
+                <X className="h-4 w-4" />
+              </Button>
             </div>
           </div>
         ) : null}
 
-        <div className="rounded-2xl border border-white/10 bg-card/30 p-4 sm:p-6">
-          <Tabs value={timer.mode} className="w-full">
+        <section className="rounded-3xl border border-white/10 bg-card/30 p-4 sm:p-6" aria-label="Timer">
+          <Tabs value={timer.mode} onValueChange={(value) => switchMode(value as Mode)}>
             <TabsList className="grid w-full grid-cols-3">
-              <TabsTrigger value="work" onClick={() => switchMode('work')}>Work</TabsTrigger>
-              <TabsTrigger value="shortBreak" onClick={() => switchMode('shortBreak')}>Short Break</TabsTrigger>
-              <TabsTrigger value="longBreak" onClick={() => switchMode('longBreak')}>Long Break</TabsTrigger>
+              <TabsTrigger value="work">Focus</TabsTrigger>
+              <TabsTrigger value="shortBreak">Short</TabsTrigger>
+              <TabsTrigger value="longBreak">Long</TabsTrigger>
             </TabsList>
           </Tabs>
 
-          <div className="mt-4 space-y-2 text-center">
-            <p className="text-sm text-muted-foreground">{modeText}</p>
-            <h1 className={cn('font-black tabular-nums text-6xl sm:text-8xl')} aria-label={`Remaining time ${formatTimerMs(timer.remainingMs)}`}>
+          <div className={cn('mt-6 text-center transition-opacity duration-300', isHydrated ? 'opacity-100' : 'opacity-0')}>
+            <h1 className="sr-only">PomoVNO Pomodoro timer</h1>
+            <p className="text-sm uppercase tracking-[0.3em] text-muted-foreground">{MODE_LABELS[timer.mode]}</p>
+            <p role="timer" aria-label={`${formatTimerMs(timer.remainingMs)} remaining`} className="mt-1 font-black tabular-nums leading-none text-[clamp(4.5rem,24vw,8.5rem)]">
               {formatTimerMs(timer.remainingMs)}
-            </h1>
-            <p className="text-xs text-muted-foreground">
-              Session {Math.min(cycleProgress + 1, settings.longBreakInterval)} of {settings.longBreakInterval} • Completed in cycle: {cycleProgress}
             </p>
+
+            <div className="mx-auto mt-5 h-1 w-full max-w-xs overflow-hidden rounded-full bg-white/10" aria-hidden="true">
+              <div className="h-full rounded-full bg-white transition-[width] duration-300 ease-linear" style={{ width: `${Math.min(Math.max(progress, 0), 1) * 100}%` }} />
+            </div>
+
+            <div className="mt-4 flex justify-center gap-2" role="img" aria-label={`${cycleDone} of ${cycleLength} focus sessions completed this cycle`}>
+              {Array.from({ length: cycleLength }, (_, index) => (
+                <span
+                  key={index}
+                  className={cn(
+                    'h-2 w-2 rounded-full border border-white/40',
+                    index < cycleDone && 'border-white bg-white',
+                    index === cycleDone && timer.mode === 'work' && 'border-white'
+                  )}
+                />
+              ))}
+            </div>
           </div>
 
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-            <Button
-              onClick={() => (timer.isRunning ? pauseTimer() : void startTimer())}
-              size="lg"
-              className="h-14 min-w-32 rounded-2xl text-lg"
-            >
-              {timer.isRunning ? <Pause size={22} /> : <Play size={22} />}
-              <span className="ml-2">{timer.isRunning ? 'Pause' : 'Start'}</span>
+          <div className="mt-6 flex items-center justify-center gap-3">
+            <Button onClick={resetTimer} variant="secondary" size="icon" className="h-14 w-14 rounded-2xl" aria-label="Reset timer (press again to reset the cycle)">
+              <RotateCcw className="h-5 w-5" />
             </Button>
-            <Button onClick={resetTimer} variant="secondary" size="lg" className="h-14 min-w-14 rounded-2xl" aria-label="Reset timer">
-              <RotateCcw size={20} />
+            <Button onClick={toggleTimer} size="lg" className="h-16 min-w-36 rounded-2xl text-lg">
+              {timer.isRunning ? <Pause className="h-6 w-6" aria-hidden="true" /> : <Play className="h-6 w-6" aria-hidden="true" />}
+              <span className="ml-2">{timer.isRunning ? 'Pause' : timer.remainingMs < timer.durationMs ? 'Resume' : 'Start'}</span>
             </Button>
-            <Button onClick={skipInterval} variant="secondary" size="lg" className="h-14 min-w-14 rounded-2xl" aria-label="Skip interval">
-              <SkipForward size={20} />
-            </Button>
-            <Button onClick={addOneMinute} variant="secondary" size="lg" className="h-14 min-w-14 rounded-2xl" aria-label="Add one minute">
-              <Plus size={20} />
+            <Button onClick={skipInterval} variant="secondary" size="icon" className="h-14 w-14 rounded-2xl" aria-label="Skip to next interval">
+              <SkipForward className="h-5 w-5" />
             </Button>
           </div>
-        </div>
+          <div className="mt-3 flex justify-center">
+            <Button onClick={addOneMinute} variant="ghost" size="sm" className="text-muted-foreground" aria-label="Add one minute">
+              <Plus className="mr-1 h-4 w-4" /> 1 min
+            </Button>
+          </div>
+        </section>
 
-        <div className="grid gap-3 rounded-2xl border border-white/10 bg-card/20 p-4 sm:grid-cols-2">
+        <section className="grid gap-3 rounded-3xl border border-white/10 bg-card/20 p-4 sm:grid-cols-2">
           <div className="space-y-2">
             <Label htmlFor="focus-label">Current focus</Label>
             <Input
               id="focus-label"
               value={focusLabel}
               maxLength={80}
+              enterKeyHint="done"
+              autoComplete="off"
               onChange={(event) => setFocusLabel(event.target.value)}
-              placeholder="What are you focusing on?"
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === 'Escape') event.currentTarget.blur();
+              }}
+              placeholder="What are you working on?"
             />
-            <p className="text-xs text-muted-foreground">Stored locally on this device.</p>
           </div>
-          <div className="rounded-lg border border-white/10 p-3 text-sm">
-            <p className="font-medium">Daily focus summary</p>
-            <p className="mt-1 text-muted-foreground">Today: {todaySummary.sessions} sessions • {todaySummary.focusMinutes} minutes</p>
-            <p className="text-muted-foreground">Last 7 days: {weeklySummary.sessions} sessions • {weeklySummary.focusMinutes} minutes</p>
-          </div>
-        </div>
+          <dl className="grid grid-cols-2 gap-2 text-sm">
+            <div className="rounded-xl border border-white/10 p-3">
+              <dt className="text-xs text-muted-foreground">Today</dt>
+              <dd className="mt-1 font-semibold tabular-nums">{formatMinutes(today.focusMinutes)}</dd>
+              <dd className="text-xs text-muted-foreground">
+                {today.sessions} session{today.sessions === 1 ? '' : 's'}
+              </dd>
+            </div>
+            <div className="rounded-xl border border-white/10 p-3">
+              <dt className="text-xs text-muted-foreground">Last 7 days</dt>
+              <dd className="mt-1 font-semibold tabular-nums">{formatMinutes(week.focusMinutes)}</dd>
+              <dd className="text-xs text-muted-foreground">
+                {week.sessions} session{week.sessions === 1 ? '' : 's'}
+              </dd>
+            </div>
+          </dl>
+        </section>
 
         {isHelpOpen ? (
-          <div className="rounded-xl border border-white/20 bg-card/60 p-3 text-sm">
-            <p className="font-medium">Keyboard shortcuts</p>
-            <ul className="mt-2 grid gap-1 text-muted-foreground sm:grid-cols-2">
-              <li>Space — Start/Pause</li>
-              <li>R — Reset</li>
-              <li>S — Skip interval</li>
-              <li>F — Fullscreen</li>
-              <li>1/2/3 — Work/Short/Long</li>
+          <section className="rounded-xl border border-white/15 bg-card/60 p-3 text-sm" aria-label="Keyboard shortcuts">
+            <ul className="grid gap-1 text-muted-foreground sm:grid-cols-2">
+              <li><kbd className="font-mono text-foreground">Space</kbd> start / pause</li>
+              <li><kbd className="font-mono text-foreground">R</kbd> reset (twice: reset cycle)</li>
+              <li><kbd className="font-mono text-foreground">S</kbd> skip interval</li>
+              <li><kbd className="font-mono text-foreground">+</kbd> add one minute</li>
+              <li><kbd className="font-mono text-foreground">1 2 3</kbd> focus / short / long</li>
+              {canFullscreen ? <li><kbd className="font-mono text-foreground">F</kbd> fullscreen</li> : null}
+              <li><kbd className="font-mono text-foreground">?</kbd> toggle this help</li>
             </ul>
-          </div>
+          </section>
         ) : null}
       </div>
 
@@ -733,13 +594,10 @@ export function PomodoroTimer() {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
-        onSave={(nextSettings) => {
-          void saveSettings(nextSettings);
-          setIsSettingsOpen(false);
-        }}
-        onApplyPreset={applyPreset}
+        timerIsActive={timer.isRunning || timer.remainingMs < timer.durationMs}
+        onSave={saveSettings}
         notificationPermission={notificationPermission}
-        onRequestNotificationPermission={requestNotificationPermission}
+        onRequestNotificationPermission={askNotificationPermission}
       />
     </>
   );

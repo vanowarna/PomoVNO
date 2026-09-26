@@ -83,6 +83,14 @@
   }
 }
 
+@layer base {
+  html,
+  body {
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
 @layer utilities {
   .flash-overlay-animation {
     opacity: 0;
@@ -95,14 +103,13 @@
       opacity: 0;
     }
     50% {
-      opacity: 0.8;
+      opacity: 0.4;
     }
+  }
 
-    @media (prefers-reduced-motion: reduce) {
-      .flash-overlay-animation {
-        animation: none;
-        opacity: 0;
-      }
+  @media (prefers-reduced-motion: reduce) {
+    .flash-overlay-animation {
+      animation: flash-opacity 1.2s ease-in-out 1;
     }
   }
 }
