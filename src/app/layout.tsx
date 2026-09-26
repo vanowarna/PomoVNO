@@ -5,8 +5,8 @@ import { cn } from '@/lib/utils';
 import { PwaRegister } from '@/components/pwa-register';
 
 export const metadata: Metadata = {
-  title: 'Pomodoro Timer | Vano',
-  description: 'Offline-first Pomodoro timer for focus sessions on desktop and mobile.',
+  title: 'PomoVNO · Pomodoro Timer',
+  description: 'A minimal, free and open source Pomodoro timer that installs as an app and works fully offline.',
   applicationName: 'PomoVNO',
   manifest: '/manifest.webmanifest',
   appleWebApp: {
@@ -14,6 +14,7 @@ export const metadata: Metadata = {
     statusBarStyle: 'black-translucent',
     title: 'PomoVNO',
   },
+  formatDetection: { telephone: false },
   icons: {
     icon: [
       { url: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
@@ -30,6 +31,7 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',
+  interactiveWidget: 'resizes-content',
 };
 
 export default function RootLayout({
@@ -39,13 +41,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <head>
-        <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
-      </head>
       <body className={cn('font-body antialiased', 'bg-background text-foreground')} suppressHydrationWarning>
+        {/* Toaster mounts first so toasts raised by the page's startup effects are not dropped. */}
+        <Toaster />
         <PwaRegister />
         {children}
-        <Toaster />
       </body>
     </html>
   );
